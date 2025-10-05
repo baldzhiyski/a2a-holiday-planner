@@ -15,9 +15,10 @@ def main():
         default_input_modes=ActivitiesScraperAgent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=ActivitiesScraperAgent.SUPPORTED_CONTENT_TYPES,
         capabilities=AgentCapabilities(streaming=False),
-        skills=[AgentSkill(id="activities", name="Activities Scraper", description="Returns JSON activities", tags=["scrape","activities"])]
+        skills=[AgentSkill(id="activities", name="Activities Scraper", description="Returns JSON activities", tags=["scrape","activities"])],
+        preferred_transport="HTTP+JSON"
     )
-    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(ActivitiesExecutor(), InMemoryTaskStore())).build()
+    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(agent_executor=ActivitiesExecutor(), task_store=InMemoryTaskStore())).build()
     uvicorn.run(app, host="localhost", port=12023)
 
 if __name__=="__main__":

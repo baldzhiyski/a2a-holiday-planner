@@ -18,7 +18,7 @@ class BudgetOutput(BaseModel):
     notes: str | None = None
 
 class BudgetAgent:
-    SUPPORTED_CONTENT_TYPES=["text","text/plain"]
+    SUPPORTED_CONTENT_TYPES=["text/plain"]
     SYSTEM=(
         "You are BudgetPolicy. Input includes total_budget_eur and passengers. "
         "Allocate caps: flights ~45%, hotel ~40%, activities ~15%, with small adjustments for 2+ pax. "

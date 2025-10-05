@@ -16,9 +16,10 @@ def main():
         default_input_modes=FlightsScraperAgent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=FlightsScraperAgent.SUPPORTED_CONTENT_TYPES,
         capabilities=AgentCapabilities(streaming=False),
-        skills=[AgentSkill(id="flights", name="Flight Search Scraper", description="Returns JSON flights", tags=["scrape","flights"])]
+        skills=[AgentSkill(id="flights", name="Flight Search Scraper", description="Returns JSON flights", tags=["scrape","flights"])],
+        preferred_transport="HTTP+JSON"
     )
-    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(FlightsExecutor(), InMemoryTaskStore())).build()
+    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(agent_executor=FlightsExecutor(), task_store=InMemoryTaskStore())).build()
     uvicorn.run(app, host="localhost", port=12021)
 
 if __name__=="__main__":

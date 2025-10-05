@@ -33,7 +33,7 @@ class ActivitiesResponse(BaseModel):
     items: List[ActivityItem]
 
 class ActivitiesScraperAgent:
-    SUPPORTED_CONTENT_TYPES=["text","text/plain"]
+    SUPPORTED_CONTENT_TYPES=["text/plain"]
     def __init__(self):
         self.llm=LLM(model="openai/gpt-4o-mini")
         self.search=SerperDevTool()

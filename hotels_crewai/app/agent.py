@@ -1,4 +1,5 @@
 import json
+import os
 from typing import List
 from pydantic import BaseModel, Field, ValidationError
 from crewai import LLM, Agent, Crew, Process, Task
@@ -33,9 +34,12 @@ class Hotels(BaseModel):
     hotels: List[HotelItem]
 
 class HotelsScraperAgent:
-    SUPPORTED_CONTENT_TYPES=["text","text/plain"]
+    SUPPORTED_CONTENT_TYPES=["text/plain"]
     def __init__(self):
-        self.llm=LLM(model="openai/gpt-4o-mini")
+        self.llm = LLM(
+            model="gemini/gemini-2.0-flash",
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
         self.search=SerperDevTool()
         self.scrape=ScrapeWebsiteTool()
         self.agent=Agent(

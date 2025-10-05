@@ -15,9 +15,16 @@ def main():
         default_input_modes=HotelsScraperAgent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=HotelsScraperAgent.SUPPORTED_CONTENT_TYPES,
         capabilities=AgentCapabilities(streaming=False),
-        skills=[AgentSkill(id="hotels", name="Hotels Scraper", description="Returns JSON hotels", tags=["scrape","hotels"])]
+        skills=[AgentSkill(id="hotels", name="Hotels Scraper", description="Returns JSON hotels", tags=["scrape","hotels"])],
+        preferred_transport="HTTP+JSON"
     )
-    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(HotelsExecutor(), InMemoryTaskStore())).build()
+    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(agent_executor=HotelsExecutor(), task_store=InMemoryTaskStore())).build()
+    try:
+        for r in app.routes:
+            print("[routes]", getattr(r, "methods", "?"), getattr(r, "path", "?"))
+    except Exception:
+        pass
+
     uvicorn.run(app, host="localhost", port=12022)
 
 if __name__=="__main__":

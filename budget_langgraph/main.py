@@ -15,9 +15,11 @@ def main():
         default_input_modes=BudgetAgent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=BudgetAgent.SUPPORTED_CONTENT_TYPES,
         capabilities=AgentCapabilities(streaming=False),
-        skills=[AgentSkill(id="budget_caps", name="Budget Caps", description="Returns JSON caps", tags=["budget","policy"])]
+        skills=[AgentSkill(id="budget_caps", name="Budget Caps", description="Returns JSON caps", tags=["budget","policy"])],
+        preferred_transport="HTTP+JSON"
+
     )
-    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(BudgetExecutor(), InMemoryTaskStore())).build()
+    app=A2AStarletteApplication(agent_card=card, http_handler=DefaultRequestHandler(agent_executor=BudgetExecutor(), task_store=InMemoryTaskStore())).build()
     uvicorn.run(app, host="localhost", port=12024)
 
 if __name__=="__main__":

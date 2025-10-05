@@ -10,11 +10,12 @@ dependencies = [
   "httpx",
   "python-dotenv",
   "starlette",
-    "sse-starlette",
+  "sse-starlette",
   "langgraph",
   "langchain-core",
   "langchain-openai",
-    "a2a-sdk>=0.2.5",
-    "crewai[tools]>=0.126.0",
-    "pydantic"
+  "a2a-sdk>=0.2.5",
+  "crewai[tools]>=0.126.0",
+  "pydantic",
+  "streamlit>=1.50.0",
 ]

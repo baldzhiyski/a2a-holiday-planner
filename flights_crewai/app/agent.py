@@ -1,4 +1,5 @@
-import json, os
+import ast
+import json, os, re
 from typing import List
 from pydantic import BaseModel, ValidationError
 from crewai import LLM, Agent, Crew, Process, Task
@@ -52,16 +53,16 @@ class FlightsScraperAgent:
             backstory="Expert at flight meta-search; outputs only valid JSON under key 'flights'.",
             tools=[self.search, self.scrape],
             llm=self.llm,
-            verbose=False,
+            verbose=True,
             allow_delegation=False,
         )
 
     def _plan_task(self, query: FlightQuery) -> Task:
         prompt = (
             "You must return a STRICT JSON OBJECT (not text) with this structure:\n\n"
-            "{\n"
+            "{{\n"
             '  "flights": [\n'
-            "    {\n"
+            "    {{\n"
             '      "source": "JFK",\n'
             '      "dest": "LHR",\n'
             '      "depart_iso": "2025-07-01T09:30:00",\n'
@@ -73,9 +74,9 @@ class FlightsScraperAgent:
             '      "cabin": "Economy",\n'
             '      "link": "https://...",\n'
             '      "source_site": "Skyscanner"\n'
-            "    }\n"
+            "    }}\n"
             "  ]\n"
-            "}\n\n"
+            "}}\n\n"
             "Constraints: from {origin} to {dest} on {out}, return on {ret}; "
             "depart after {dap} local, return after {rap} local; no red-eyes if requested; {pax} passengers.\n\n"
             "Steps:\n"
@@ -86,7 +87,8 @@ class FlightsScraperAgent:
         ).format(
             origin=query.origin, dest=query.dest,
             out=query.start_date, ret=query.end_date,
-            dap=query.depart_after, rap=query.return_after, pax=query.passengers
+            dap=query.depart_after, rap=query.return_after,
+            pax=query.passengers
         )
 
         return Task(
@@ -96,23 +98,108 @@ class FlightsScraperAgent:
             output_json=FlightList,
         )
 
+    def _extract_first_json(self, s: str):
+        """Tolerant extractor: handles prose, code fences, JSON, and Python-literal dicts/lists."""
+        candidates = [s]
+
+        # strip ```json fences if present
+        fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", s.strip(),
+                        flags=re.IGNORECASE | re.MULTILINE)
+        if fenced != s:
+            candidates.append(fenced)
+
+        # find first {...} or [...] block
+        m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
+        if m:
+            candidates.append(m.group(1))
+
+        for c in candidates:
+            # 1) Try strict JSON first
+            try:
+                return json.loads(c)
+            except Exception:
+                pass
+            # 2) Try Python literal (Crew often returns single-quoted dicts/lists)
+            try:
+                data = ast.literal_eval(c)
+                if isinstance(data, (dict, list)):
+                    return data
+            except Exception:
+                pass
+
+        return None
+
     def invoke_structured(self, raw: str) -> str:
-        # raw is a JSON string from Host with FlightQuery fields
-        q = FlightQuery.model_validate_json(raw)
+        # 0) Validate input JSON
+        try:
+            q = FlightQuery.model_validate_json(raw)
+        except Exception as e:
+            print("[flights] bad input JSON:", e)
+            print("[flights] raw was:", raw[:400])
+            return '{"flights": []}'
+
+        # 0.5) Stub when keys are missing (lets you test wiring)
+        if not os.getenv("OPENAI_API_KEY") or not os.getenv("SERPER_API_KEY"):
+            print("[flights] missing API keys; returning stub data")
+            return json.dumps({
+                "flights": [
+                    {
+                        "source": q.origin,
+                        "dest": q.dest,
+                        "depart_iso": f"{q.start_date}T10:45:00",
+                        "arrive_iso": f"{q.start_date}T13:15:00",
+                        "airline": "Vueling",
+                        "flight_no": "VY1885",
+                        "duration_min": 150,
+                        "price_eur": 145.0,
+                        "cabin": "Economy",
+                        "link": "https://example/fl1",
+                        "source_site": "stub"
+                    },
+                    {
+                        "source": q.dest,
+                        "dest": q.origin,
+                        "depart_iso": f"{q.end_date}T16:10:00",
+                        "arrive_iso": f"{q.end_date}T18:45:00",
+                        "airline": "easyJet",
+                        "flight_no": "U21834",
+                        "duration_min": 155,
+                        "price_eur": 160.0,
+                        "cabin": "Economy",
+                        "link": "https://example/fl2",
+                        "source_site": "stub"
+                    }
+                ]
+            }, indent=2)
+
+        # 1) Run Crew
         task = self._plan_task(q)
-        crew = Crew(agents=[self.agent], tasks=[task], process=Process.sequential, verbose=False)
+        crew = Crew(agents=[self.agent], tasks=[task], process=Process.sequential, verbose=True)
         out = crew.kickoff()
 
-        # Convert output to JSON safely
+        # 2) Log raw output
         s = out if isinstance(out, str) else str(out)
+        print("[flights] raw crew output (first 600):\n", s[:600])
+
+        # 3) Extract JSON robustly
+        data = self._extract_first_json(s)
+        if data is None:
+            print("[flights] JSON extraction failed; returning empty.")
+            return '{"flights": []}'
+
+        # Accept either {"flights":[...]} or [...]
+        if isinstance(data, list):
+            data = {"flights": data}
+
+        # 4) Validate and serialize
         try:
-            data = json.loads(s)
-            # Validate against FlightList (ensures object with 'flights' key)
             validated = FlightList.model_validate(data)
+            print("[flights] validated items:", len(validated.flights))
             return validated.model_dump_json(indent=2)
         except ValidationError as e:
-            print("Validation failed:", e)
+            print("[flights] schema validation failed:", e)
             return '{"flights": []}'
         except Exception as e:
-            print("JSON parsing error:", e)
+            print("[flights] unexpected error:", e)
             return '{"flights": []}'
+

@@ -1,64 +1,64 @@
+# agent.py
 import json
-from pydantic import BaseModel
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
+from typing import Optional
+
+from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-memory=MemorySaver()
 
 class BudgetOutput(BaseModel):
-    flight_cap_eur: float
-    hotel_cap_eur: float
-    activities_cap_eur: float
-    notes: str | None = None
+    flight_cap_eur: float = Field(..., description="Cap for flights in EUR")
+    hotel_cap_eur: float = Field(..., description="Cap for hotel in EUR")
+    activities_cap_eur: float = Field(..., description="Cap for activities in EUR")
+    notes: Optional[str] = Field(None, description="Optional notes")
+
 
 class BudgetAgent:
-    SUPPORTED_CONTENT_TYPES=["text/plain"]
-    SYSTEM=(
-        "You are BudgetPolicy. Input includes total_budget_eur and passengers. "
-        "Allocate caps: flights ~45%, hotel ~40%, activities ~15%, with small adjustments for 2+ pax. "
-        "Return a STRICT JSON object matching BudgetOutput."
+    """
+    Direct structured-output agent (no LangGraph / no ReAct).
+    The model returns a STRICT BudgetOutput JSON.
+    """
+
+    SYSTEM = (
+        "You are BudgetPolicy. You ONLY help with budget allocation for trips.\n"
+        "Inputs: total_budget_eur and passengers.\n"
+        "Allocate caps: flights ≈45%, hotel ≈40%, activities ≈15%.\n"
+        "For 2+ passengers: slightly increase activities (~+10%) and slightly decrease hotel (~-5%).\n"
+        "Return ONLY a JSON object that matches the BudgetOutput schema exactly.\n"
+        "Do NOT include any extra text or keys."
     )
 
-    def __init__(self):
-        self.llm=ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        self.graph=create_react_agent(
-            self.llm,
-            tools=[self.compute_caps],
-            checkpointer=memory,
-            prompt=self.SYSTEM,
-            response_format=BudgetOutput
+    SUPPORTED_CONTENT_TYPES = ["text/plain"]
+
+    def __init__(self, model: str = "gpt-4o-mini", temperature: float = 0.0):
+        self.llm = ChatOpenAI(model=model, temperature=temperature)
+
+        # Build a small chain: prompt -> structured output
+        self.prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.SYSTEM),
+                (
+                    "user",
+                    "User text: {user_text}\n\n"
+                    "Extract `total_budget_eur` and `passengers` from the user text and produce BudgetOutput.",
+                ),
+            ]
         )
+        self.chain = self.prompt | self.llm.with_structured_output(BudgetOutput)
 
-    @tool
-    def compute_caps(self, total_budget_eur: int, passengers: int) -> str:
+    def invoke(self, user_text: str) -> BudgetOutput:
         """
-        Compute budget caps for flights, hotel, and activities.
-
-                Args:
-                    total_budget_eur: Total trip budget in EUR.
-                    passengers: Number of travelers.
-
-                Returns:
-                    JSON string matching BudgetOutput with keys:
-                    flight_cap_eur, hotel_cap_eur, activities_cap_eur, notes.
+        Synchronously generates a BudgetOutput from arbitrary user text.
+        Example user_text:
+            - 'We have a total budget of 2500 EUR for 3 passengers.'
+            - 'total_budget_eur=1800, passengers=2'
         """
-        tb=float(total_budget_eur)
-        # baselines
-        flights=tb*0.45
-        hotel=tb*0.40
-        activities=tb*0.15
-        if passengers>=2:
-            activities*=1.1
-            hotel*=0.95
-        return json.dumps({
-            "flight_cap_eur": round(flights,2),
-            "hotel_cap_eur": round(hotel,2),
-            "activities_cap_eur": round(activities,2),
-            "notes":"Baseline caps; tweak per market."
-        })
+        # You can optionally pre-normalize user_text here if you want.
+        result: BudgetOutput = self.chain.invoke({"user_text": user_text})
+        return result
+

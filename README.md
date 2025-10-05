@@ -176,7 +176,7 @@ uv run -m hotels_crewai.main
 uv run -m activities_crewai.main
 
 # 4️⃣ Budget Agent
-uv run -m budget_langgraph.main
+uv run -m budget_agent.main
 
 # 5️⃣ Host Agent (Orchestrator)
 uv run --active adk web

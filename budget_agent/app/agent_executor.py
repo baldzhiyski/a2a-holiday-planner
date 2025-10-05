@@ -12,7 +12,7 @@ from a2a.types import (
     UnsupportedOperationError,
 )
 from a2a.utils.errors import ServerError
-from budget_langgraph.app.agent import BudgetAgent
+from budget_agent.app.agent import BudgetAgent
 
 
 class BudgetExecutor(AgentExecutor):

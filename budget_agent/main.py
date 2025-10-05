@@ -3,8 +3,8 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
-from budget_langgraph.app.agent import BudgetAgent
-from budget_langgraph.app.agent_executor import BudgetExecutor
+from budget_agent.app.agent import BudgetAgent
+from budget_agent.app.agent_executor import BudgetExecutor
 
 def main():
     card=AgentCard(

@@ -2,7 +2,7 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, AsyncIterable, Dict, List, Optional
 
 import httpx
@@ -20,36 +20,48 @@ from dotenv import load_dotenv
 from google.adk import Agent
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.artifacts import InMemoryArtifactService
-from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
+from google.adk.memory import InMemoryMemoryService as _IMM  # keep alias stable if imports vary
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
-# Use the SAME connection wrapper as your working host (expects SendMessageRequest)
+# Your existing connection wrapper
 from host_agent_last.agent.remote_connection import RemoteAgentConnections
+
 
 load_dotenv()
 nest_asyncio.apply()
 
 
-# -------------------- small utils --------------------
-def _extract_text_artifacts(send_response: SendMessageResponse) -> List[str]:
-    """Extract all text parts from an A2A SendMessageResponse."""
+# ---------- tolerant helpers ----------
+def _collect_text_parts(send_response: SendMessageResponse) -> List[str]:
+    """Collect *any* textual payloads from artifacts (no strict 'type' checks)."""
     if not isinstance(send_response.root, SendMessageSuccessResponse):
         return []
-    raw = json.loads(send_response.root.model_dump_json(exclude_none=True))
-    parts: List[str] = []
-    for art in (raw.get("result", {}) or {}).get("artifacts", []) or []:
-        for p in art.get("parts", []) or []:
-            if p.get("type") == "text" and "text" in p:
-                parts.append(p["text"])
-    return parts
+    try:
+        raw = json.loads(send_response.root.model_dump_json(exclude_none=True))
+    except Exception:
+        return []
+    parts_out: List[str] = []
+    artifacts = (raw.get("result", {}) or {}).get("artifacts", []) or []
+    for art in reversed(artifacts):  # newest first
+        for p in (art.get("parts") or []):
+            if isinstance(p, dict) and "text" in p and isinstance(p["text"], str):
+                parts_out.append(p["text"])
+            elif isinstance(p, str):
+                parts_out.append(p)
+            else:
+                try:
+                    parts_out.append(json.dumps(p, ensure_ascii=False))
+                except Exception:
+                    parts_out.append(str(p))
+    return parts_out
 
 
-def _first_json(payloads: List[str]) -> Optional[dict]:
-    """Return the first valid JSON object from a list of strings."""
-    for txt in payloads:
+def _first_json(parts: List[str]) -> Optional[dict]:
+    """Return the first valid JSON object/list found across strings; else None."""
+    for txt in parts:
         try:
             obj = json.loads(txt)
             if isinstance(obj, (dict, list)):
@@ -59,16 +71,109 @@ def _first_json(payloads: List[str]) -> Optional[dict]:
     return None
 
 
-def _safe_get(d: dict, key: str, default):
+def _eu(n: float) -> str:
     try:
-        return d.get(key, default)
+        return f"€{float(n):.0f}"
     except Exception:
-        return default
+        return "€–"
+
+
+def _loose(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+
+def _match_leg(f: dict, src: str, dst: str) -> bool:
+    """Loose match for BER/Berlin and BCN/Barcelona, etc."""
+    fs, fd = _loose(f.get("source")), _loose(f.get("dest"))
+    src, dst = _loose(src), _loose(dst)
+    return (src in fs or fs in src) and (dst in fd or fd in dst)
+
+
+def _mk_quick_picks(origin, dest, start_date, end_date, passengers, total_budget_eur, bp, fljs, htjs, acjs) -> List[dict]:
+    """Best-effort: pair 1 out + 1 in + 1 hotel + a couple of activities."""
+    flight_cap = float(bp.get("flight_cap_eur", total_budget_eur))
+    hotel_cap = float(bp.get("hotel_cap_eur", total_budget_eur))
+
+    flights  = fljs.get("flights", []) if isinstance(fljs, dict) else []
+    hotels   = htjs.get("hotels",  []) if isinstance(htjs, dict) else []
+    acts_all = acjs.get("items",   []) if isinstance(acjs, dict) else []
+
+    outbounds = [f for f in flights if _match_leg(f, origin, dest)] or flights[:1]
+    inbounds  = [f for f in flights if _match_leg(f, dest, origin)] or flights[-1:]
+
+    hotels_sorted = sorted(
+        hotels,
+        key=lambda h: (
+            float(h.get("price_total_eur", 1e9)) <= hotel_cap,
+            float(h.get("rating", 0.0)),
+            -float(h.get("price_total_eur", 0.0))
+        ),
+        reverse=True
+    )
+    acts_sorted = sorted(
+        acts_all,
+        key=lambda a: (float(a.get("rating", 0.0)), -float(a.get("price_eur", 0.0))),
+        reverse=True
+    )
+
+    picks = []
+    built = 0
+    for o in outbounds[:3]:
+        for i in inbounds[:3]:
+            for h in hotels_sorted[:4]:
+                price_out_pp = float(o.get("price_eur", 0.0) or 0.0)
+                price_in_pp  = float(i.get("price_eur", 0.0) or 0.0)
+                flight_total = (price_out_pp + price_in_pp) * max(1, passengers)
+                hotel_total  = float(h.get("price_total_eur", 0.0) or 0.0)
+                chosen_acts  = acts_sorted[:2]
+                acts_total   = sum(float(a.get("price_eur", 0.0) or 0.0) for a in chosen_acts)
+                grand        = flight_total + hotel_total + acts_total
+
+                picks.append({
+                    "hotel_name": h.get("name", "Hotel"),
+                    "hotel_rating": h.get("rating", None),
+                    "hotel_district": h.get("district", ""),
+                    "hotel_price": hotel_total,
+                    "flight_total": flight_total,
+                    "out_pp": price_out_pp,
+                    "in_pp": price_in_pp,
+                    "acts_titles": [a.get("title", "Activity") for a in chosen_acts],
+                    "acts_total": acts_total,
+                    "grand_total": grand,
+                    "links": {
+                        "out": o.get("link", ""),
+                        "back": i.get("link", ""),
+                        "hotel": h.get("link", "")
+                    }
+                })
+                built += 1
+                if built >= 3:
+                    return picks
+    return picks
+
+
+def _format_picks_table(picks: List[dict]) -> str:
+    if not picks:
+        return "_No quick picks available._"
+    lines = ["| Option | Hotel (rating • area) | Costs | Links |",
+             "|---:|---|---|---|"]
+    for idx, p in enumerate(picks, 1):
+        hotel = f"**{p['hotel_name']}**" + (f" (⭐ {p['hotel_rating']:.1f})" if p.get("hotel_rating") else "") \
+                + (f" • {p['hotel_district']}" if p.get("hotel_district") else "")
+        costs = (
+            f"Total: **{_eu(p['grand_total'])}**  \n"
+            f"Flights: {_eu(p['flight_total'])} (out {_eu(p['out_pp']*2)} / in {_eu(p['in_pp']*2)})  \n"
+            f"Hotel: {_eu(p['hotel_price'])}  \n"
+            + (f"Activities: {', '.join(p['acts_titles'])} ({_eu(p['acts_total'])})" if p.get("acts_titles") else "")
+        )
+        links = f"[out]({p['links']['out']}) • [back]({p['links']['back']}) • [hotel]({p['links']['hotel']})"
+        lines.append(f"| **{idx}** | {hotel} | {costs} | {links} |")
+    return "\n".join(lines)
 
 
 # -------------------- Host Agent --------------------
 class TripHostAgent:
-    """ADK Host for multi-agent trip planning."""
+    """Simple orchestrator: fetch crew outputs, show it cleanly, and propose quick picks."""
 
     def __init__(self) -> None:
         self.remote_agent_connections: Dict[str, RemoteAgentConnections] = {}
@@ -82,13 +187,12 @@ class TripHostAgent:
             agent=self._agent,
             artifact_service=InMemoryArtifactService(),
             session_service=InMemorySessionService(),
-            memory_service=InMemoryMemoryService(),
+            memory_service=_IMM(),
         )
-        self._last_candidates: Dict[str, List[dict]] = {}
 
-    # ---------- bootstrapping remotes ----------
+    # ---------- bootstrap remotes ----------
     async def _async_init_components(self, remote_agent_addresses: List[str]) -> None:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient() as client:
             for address in remote_agent_addresses:
                 try:
                     card = await A2ACardResolver(client, address).get_agent_card()
@@ -101,14 +205,9 @@ class TripHostAgent:
 
         info_lines = [
             json.dumps(
-                {
-                    "name": c.name,
-                    "description": c.description,
-                    "skills": [s.name for s in (c.skills or [])],
-                    "url": c.url,
-                }
-            )
-            for c in self.cards.values()
+                {"name": c.name, "description": c.description,
+                 "skills": [s.name for s in (c.skills or [])], "url": c.url}
+            ) for c in self.cards.values()
         ]
         self.agents_shortlist = "\n".join(info_lines) if info_lines else "No agents discovered"
 
@@ -124,41 +223,28 @@ class TripHostAgent:
             model="gemini-2.5-flash",
             name="Trip_Host",
             instruction=self._root_instruction,
-            description="Orchestrates flights, hotels, activities and budget policy via A2A agents.",
+            description="Fetch crew text, show it clearly, and propose quick picks (tolerant parsing).",
             tools=[
-                self.send_message,           # generic A2A bridge
-                self.list_connected_agents,  # discovery
-                self.plan_trip,              # high-level orchestration
-                self.book_itinerary,         # confirm a candidate
+                self.list_connected_agents,
+                self.plan_trip,  # pretty summary + quick picks + optional raw
             ],
         )
 
     def _root_instruction(self, _: ReadonlyContext) -> str:
         return f"""
-**Role:** You are the Trip Host. You coordinate with A2A “friend agents” to plan a multi-day trip end-to-end.
+You are the Trip Host. Keep things friendly and readable:
+- Call remote agents (BudgetPolicy, FlightsScraper, HotelsScraper, ActivitiesScraper).
+- Be tolerant: if JSON is present, lightly parse it to build a few "Quick Picks".
+- Never fail hard on schema mismatches; fall back to showing raw crew text.
+- Keep the response well-formatted for a human.
 
-**How to work:**
-- Use `list_connected_agents()` if asked which agents are available.
-- When planning, call `send_message` to contact:
-  • **BudgetPolicy** — to split the total budget into per-category caps.  
-  • **FlightsScraper** — to get flight options.  
-  • **HotelsScraper** — to get hotel options.  
-  • **ActivitiesScraper** — to get tours & activities.
-- Then call `plan_trip(...)` to compose top itineraries from the JSON returned by those agents.
-- When a user picks an option, call `book_itinerary(option_index)` to confirm (mock booking).
-
-**Input hints:**
-- Ask clarifying questions only when critical fields are missing (origin, destination, dates, pax, budget).
-- Keep responses concise; use bullet points for options.
-
-**Today's Date:** {datetime.now().strftime("%Y-%m-%d")}
-
-<Available Agents JSON (name/description/skills/url)>
+Today's Date: {datetime.now().strftime("%Y-%m-%d")}
+<Agents>
 {self.agents_shortlist}
-</Available Agents JSON>
+</Agents>
         """.strip()
 
-    # ---------- Streaming to ADK ----------
+    # ---------- streaming ----------
     async def stream(self, query: str, session_id: str) -> AsyncIterable[dict[str, Any]]:
         session = await self._runner.session_service.get_session(
             app_name=self._agent.name, user_id=self._user_id, session_id=session_id
@@ -180,72 +266,39 @@ class TripHostAgent:
             else:
                 yield {"is_task_complete": False, "updates": "Trip Host is coordinating…"}
 
-    # ---------- Tools ----------
-    async def send_message(self, agent_name: str, task: str, tool_context: ToolContext):
-        """Bridge to a remote agent. Payload is a JSON string in `task`."""
+    # ---------- private bridge ----------
+    async def _send(self, agent_name: str, task_text: str) -> List[str]:
         if agent_name not in self.remote_agent_connections:
-            raise ValueError(f"Agent {agent_name} not found")
+            return [f"[{agent_name}] not connected."]
         client = self.remote_agent_connections[agent_name]
 
-        # ID management mirrors your working host
-        state = tool_context.state
-        task_id = state.get("task_id", str(uuid.uuid4()))
-        context_id = state.get("context_id", str(uuid.uuid4()))
         message_id = str(uuid.uuid4())
-
         payload = {
             "message": {
                 "role": "user",
-                "parts": [{"type": "text", "text": task}],
+                "parts": [{"type": "text", "text": task_text}],
                 "messageId": message_id,
-                "taskId": task_id,
-                "contextId": context_id,
             },
         }
 
-        # Build the SAME envelope as the working host
-        message_request = SendMessageRequest(
-            id=message_id, params=MessageSendParams.model_validate(payload)
-        )
+        req = SendMessageRequest(id=message_id, params=MessageSendParams.model_validate(payload))
+        resp: SendMessageResponse = await client.send_message(req)
+        print("[trip host] send_response", resp)
 
-        # If your RemoteAgentConnections was switched to ClientFactory that expects a "Message",
-        # replace the next line with:
-        #   send_response = await client.send_message(message_request.params.message)
-        send_response: SendMessageResponse = await client.send_message(message_request)
-        print("[trip host] send_response", send_response)
-
-        if not isinstance(send_response.root, SendMessageSuccessResponse) or not isinstance(
-            send_response.root.result, Task
-        ):
-            print("[trip host] Received a non-success or non-task response. Cannot proceed.")
-            return
-
-        response_content = send_response.root.model_dump_json(exclude_none=True)
-        json_content = json.loads(response_content)
-
-        resp: List[str] = []
-        if json_content.get("result", {}).get("artifacts"):
-            for artifact in json_content["result"]["artifacts"]:
-                if artifact.get("parts"):
-                    # collect raw text parts (identical to your working host)
-                    for p in artifact["parts"]:
-                        if isinstance(p, dict) and p.get("type") == "text" and "text" in p:
-                            resp.append(p["text"])
-        return resp
+        if not isinstance(resp.root, SendMessageSuccessResponse) or not isinstance(resp.root.result, Task):
+            return [f"[{agent_name}] unexpected response."]
+        return _collect_text_parts(resp)
 
     def list_connected_agents(self) -> str:
         items = []
         for c in self.cards.values():
             items.append(
-                {
-                    "name": c.name,
-                    "description": c.description,
-                    "skills": [getattr(s, "name", None) for s in (c.skills or [])],
-                    "url": c.url,
-                }
+                {"name": c.name, "description": c.description,
+                 "skills": [getattr(s, "name", None) for s in (c.skills or [])], "url": c.url}
             )
         return json.dumps(items, ensure_ascii=False)
 
+    # ---------- pretty planner ----------
     async def plan_trip(
         self,
         origin: str,
@@ -260,146 +313,74 @@ class TripHostAgent:
         no_redeye: bool = True,
         depart_after: str = "09:00",
         return_after: str = "14:00",
+        show_raw: bool = False,      # << new: hide raw by default
     ) -> str:
-        ctx_id = tool_context.state.get("context_id", "ctx-" + uuid.uuid4().hex[:8])
 
-        # 1) BudgetPolicy
-        bp_task = json.dumps({"total_budget_eur": int(total_budget_eur), "passengers": passengers})
-        bp_texts = await self.send_message("BudgetPolicy", bp_task, tool_context)
-        bp_json = _first_json(bp_texts or []) or {}
+        # Simple JSON tasks for crews
+        budget_task = json.dumps({"total_budget_eur": total_budget_eur, "passengers": passengers})
+        flights_task = json.dumps({
+            "origin": origin, "dest": dest,
+            "start_date": start_date, "end_date": end_date,
+            "passengers": passengers, "no_redeye": no_redeye,
+            "depart_after": depart_after, "return_after": return_after
+        })
+        hotels_task = json.dumps({
+            "city": dest, "checkin": start_date, "checkout": end_date,
+            "min_rating": 4.0 if boutique else 0.0,
+            "style": "boutique" if boutique else "any",
+            "walkable": walkable, "max_total_eur": total_budget_eur * 0.6
+        })
+        activities_task = json.dumps({
+            "city": dest, "date_from": start_date, "date_to": end_date,
+            "categories": ["food tour", "walking tour", "museum", "viewpoint"],
+            "min_rating": 4.5, "max_price_eur": 140
+        })
 
-        # 2) Flights
-        fl_task = json.dumps(
-            {
-                "origin": origin,
-                "dest": dest,
-                "start_date": start_date,
-                "end_date": end_date,
-                "passengers": passengers,
-                "no_redeye": no_redeye,
-                "depart_after": depart_after,
-                "return_after": return_after,
-            }
+        # Call all crews
+        budget_texts     = await self._send("BudgetPolicy",      budget_task)
+        flights_texts    = await self._send("FlightsScraper",    flights_task)
+        hotels_texts     = await self._send("HotelsScraper",     hotels_task)
+        activities_texts = await self._send("ActivitiesScraper", activities_task)
+
+        # Light JSON extraction (tolerant)
+        bp   = _first_json(budget_texts)     or {}
+        fljs = _first_json(flights_texts)    or {}
+        htjs = _first_json(hotels_texts)     or {}
+        acjs = _first_json(activities_texts) or {}
+
+        # Quick picks
+        picks = _mk_quick_picks(origin, dest, start_date, end_date, passengers, total_budget_eur, bp, fljs, htjs, acjs)
+
+        header = (
+            f"## Trip plan: **{origin} → {dest}**\n"
+            f"**Dates:** {start_date} → {end_date} • **Pax:** {passengers} • **Budget:** {_eu(total_budget_eur)}\n\n"
+            f"### Quick picks\n{_format_picks_table(picks)}\n\n"
+            "You can reply with: **Shortlist option 1**, **Swap hotel Casa Bonay**, **Refine flights**, "
+            "**Replace activity Tapas tour**, etc.\n"
         )
-        fl_texts = await self.send_message("FlightsScraper", fl_task, tool_context)
-        fl_json = _first_json(fl_texts or []) or {}
-        flights: List[dict] = _safe_get(fl_json, "flights", [])
 
-        # 3) Hotels
-        ht_task = json.dumps(
-            {
-                "city": dest,
-                "checkin": start_date,
-                "checkout": end_date,
-                "min_rating": 4.0 if boutique else 0.0,
-                "style": "boutique" if boutique else "any",
-                "walkable": walkable,
-                "max_total_eur": total_budget_eur * 0.6,
-            }
+        if not show_raw:
+            return header + "\n_(Say: **show raw** to include raw crew payloads.)_"
+
+        # Raw section (optional)
+        def _block(title: str, parts: List[str]) -> str:
+            if not parts:
+                return f"#### {title}\n(no results)\n"
+            body = "\n\n".join(parts)
+            return f"#### {title}\n{body}\n"
+
+        raw_section = (
+            "\n---\n### Crew outputs (raw)\n"
+            + _block("Budget", budget_texts)
+            + _block("Flights", flights_texts)
+            + _block("Hotels",  hotels_texts)
+            + _block("Activities", activities_texts)
         )
-        ht_texts = await self.send_message("HotelsScraper", ht_task, tool_context)
-        ht_json = _first_json(ht_texts or []) or {}
-        hotels: List[dict] = _safe_get(ht_json, "hotels", [])
-
-        # 4) Activities
-        ac_task = json.dumps(
-            {
-                "city": dest,
-                "date_from": start_date,
-                "date_to": end_date,
-                "categories": ["food tour", "walking tour", "museum", "viewpoint"],
-                "min_rating": 4.5,
-                "max_price_eur": 140,
-            }
-        )
-        ac_texts = await self.send_message("ActivitiesScraper", ac_task, tool_context)
-        ac_json = _first_json(ac_texts or []) or {}
-        activities: List[dict] = _safe_get(ac_json, "items", [])
-
-        # 5) Compose candidates (simple heuristic)
-        candidates: List[dict] = []
-        outs = [f for f in flights if f.get("source", "").lower() == origin.lower()]
-        ins = [f for f in flights if f.get("dest", "").lower() == origin.lower()]
-
-        for o in outs[:5]:
-            for i in ins[:5]:
-                for h in hotels[:5]:
-                    if not (o.get("depart_iso") and i.get("depart_iso")):
-                        continue
-                    picked = activities[: max(0, min(6, len(activities)))]
-                    acts_total = sum([a.get("price_eur", 0) for a in picked])
-
-                    total_cost = (
-                        float(o.get("price_eur", 0))
-                        + float(i.get("price_eur", 0))
-                        + float(h.get("price_total_eur", 0))
-                        + acts_total
-                    )
-                    if total_cost > total_budget_eur:
-                        continue
-
-                    cand = {
-                        "summary": f"{origin} → {dest} {start_date}–{end_date}, {h.get('name','?')}",
-                        "outbound": o,
-                        "inbound": i,
-                        "hotel": h,
-                        "days": [],
-                        "price_breakdown_eur": {
-                            "outbound": o.get("price_eur", 0),
-                            "inbound": i.get("price_eur", 0),
-                            "hotel": h.get("price_total_eur", 0),
-                            "activities": acts_total,
-                        },
-                        "total_eur": total_cost,
-                        "hold_links": {
-                            "flights": o.get("link", ""),
-                            "hotel": h.get("link", ""),
-                        },
-                    }
-                    candidates.append(cand)
-
-        candidates = sorted(candidates, key=lambda c: c["total_eur"])[:3]
-        self._last_candidates[ctx_id] = candidates
-
-        if not candidates:
-            return (
-                "No viable options under the given constraints. "
-                "Try adjusting dates, budget, or preferences (walkable/boutique/no_redeye)."
-            )
-
-        lines = ["Top itinerary options:"]
-        for i, c in enumerate(candidates, 1):
-            pb = c["price_breakdown_eur"]
-            flights_sum = (pb.get("outbound", 0) or 0) + (pb.get("inbound", 0) or 0)
-            lines.append(
-                f"{i}) {c['summary']} — Total €{c['total_eur']:.0f} "
-                f"(Flights €{flights_sum:.0f}, Hotel €{pb.get('hotel',0):.0f}, "
-                f"Activities €{pb.get('activities',0):.0f})"
-            )
-        lines.append("\nSay: `Book option N` to confirm.")
-        return "\n".join(lines) + "\n\n" + json.dumps({"candidates": candidates}, ensure_ascii=False)
-
-    async def book_itinerary(self, option_index: int, tool_context: ToolContext) -> str:
-        ctx_id = tool_context.state.get("context_id", "unknown")
-        cands = self._last_candidates.get(ctx_id) or []
-        if not cands or option_index < 1 or option_index > len(cands):
-            return json.dumps({"status": "error", "message": "Invalid option index"})
-        chosen = cands[option_index - 1]
-        conf = {
-            "status": "success",
-            "booking": {
-                "flights_confirmation": f"FL-{uuid.uuid4().hex[:8]}",
-                "hotel_confirmation": f"HT-{uuid.uuid4().hex[:8]}",
-                "activities_count": 0,
-            },
-            "itinerary": chosen,
-        }
-        return json.dumps(conf, ensure_ascii=False)
+        return header + raw_section
 
 
 # -------------------- factory (sync helper) --------------------
 def build_trip_host_agent_sync() -> Agent:
-    """Create & init the TripHostAgent synchronously (for notebooks / simple scripts)."""
     async def _async_main():
         remote_urls = [
             "http://localhost:12021",  # FlightsScraper

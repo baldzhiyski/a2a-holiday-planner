@@ -196,24 +196,24 @@ http://localhost:12024
 
 ## 💬 Sending a Request
 
-You can interact with the Host directly via `curl` or any HTTP client.
+You can interact with the UI and try the following example prompt:
 
-```bash
-curl -X POST http://localhost:12020/messages:sendMessage   -H "Content-Type: application/json"   -d '{
-    "id": "msg-1",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"type": "text", "text": "Plan a 4-day trip from Berlin to Lisbon, budget 2200€"}],
-        "messageId": "msg-1",
-        "taskId": "task-1",
-        "contextId": "ctx-1"
-      }
-    }
-  }'
+```text
+Plan a 14-day trip from Berlin to Barcelona (2025-06-10 → 2025-06-24) 
+for 3 passengers (2 adults + 1 teen) with a €6000 total budget. 
+
+Avoid red-eye flights; prefer departures after 09:00 and returns after 14:00. 
+
+Hotel: modern 4★ (boutique OK), near the beachfront or in a very walkable area, 
+with pool, A/C, and breakfast included. 
+
+Activities: boat tours, wine tastings, cultural or historical city tours, 
+and one half-day vineyard or village excursion. 
+
+Aim for ≥4.5★ reviews, with a maximum of €140 per activity.
+
 ```
 
----
 
 
 ## 🧠 Key Learning Points

@@ -179,8 +179,10 @@ uv run -m activities_crewai.main
 uv run -m budget_langgraph.main
 
 # 5️⃣ Host Agent (Orchestrator)
-uv run -m host.main
+uv run --active adk web
 ```
+Once all agents are running, open the A2A UI in your browser.
+From the interface, select host_agent_latest to start the orchestration process.
 
 When all are running, the Host will automatically resolve the others’ A2A cards via:
 ```
